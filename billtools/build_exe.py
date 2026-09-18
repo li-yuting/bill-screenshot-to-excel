@@ -5,8 +5,14 @@
 
 用法::
 
-    build_exe.py            # 默认 onedir（启动快）
-    build_exe.py --onefile  # 单文件（便于拷贝，冷启动慢）
+    build_exe.py            # 默认 onefile（本机能出）
+    build_exe.py --onedir   # 目录形式（本机出不来，见下）
+
+⚠️ 本机打不出 onedir：引导程序写进 ``build\\<名字>\\<名字>.exe`` 后会消失，
+COLLECT 阶段报 ``WARNING: Ignoring non-existent resource ... meant to be collected as
+<名字>.exe``，产物里只剩 ``_internal``（那一坨有 200+ MB，所以体积看着还挺大）。
+疑似企业终端安全软件（亚信安全 SECOMN64/SECOCL64 等）静默清理。
+**PyInstaller 退出码 0 也不代表产物存在** —— 所以下面必须显式判 ``target.exists()``。
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ EXE_NAME = "账单截图转Excel"
 
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
-    mode = "--onefile" if "--onefile" in args else "--onedir"
+    mode = "--onedir" if "--onedir" in args else "--onefile"
 
     command = [
         sys.executable,
@@ -48,12 +54,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[FAIL] PyInstaller 退出码 {result.returncode}")
         return result.returncode
 
-    target = HERE / "dist" / EXE_NAME / f"{EXE_NAME}.exe"
-    if mode == "--onefile":
-        target = HERE / "dist" / f"{EXE_NAME}.exe"
+    target = (
+        HERE / "dist" / f"{EXE_NAME}.exe"
+        if mode == "--onefile"
+        else HERE / "dist" / EXE_NAME / f"{EXE_NAME}.exe"
+    )
+    # 退出码 0 不代表产物存在：onedir 的引导程序会被本机安全软件吞掉
+    if not target.exists():
+        print(f"[FAIL] PyInstaller 报了成功，但产物不存在：{target}")
+        if mode == "--onedir":
+            print("       本机打不出 onedir，请改用默认的 --onefile。")
+        return 1
+
     print(f"[OK] 产物：{target}")
-    size = sum(f.stat().st_size for f in target.parent.rglob("*") if f.is_file())
-    print(f"[OK] 体积：{size / 1024 / 1024:.0f} MB")
+    print(f"[OK] 体积：{target.stat().st_size / 1024 / 1024:.0f} MB")
+    print("[NEXT] 跑 smoke_test.py 冒烟（自检 + 确认 GUI 真起窗），别只看退出码。")
     return 0
 
 

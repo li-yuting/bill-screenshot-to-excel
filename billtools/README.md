@@ -116,6 +116,10 @@ onedir 版本以前打出来过（`bill2excel\dist\账单转表格\`），后来
 Defender 里没有拦截记录（多半是第三方终端安全软件静默清理的，那家的日志 Defender 看不到）。
 如果要长期稳定地出 onedir 包，找 IT 把 `转表格` 目录加进信任区/排除项。
 
+`build_exe.py` 默认已经改成 `--onefile`，并且**会显式判 `target.exists()`**：
+PyInstaller 退出码 0 不代表产物存在（上面那个就是活例子 —— 它报了 234 MB "成功"，
+其实那 234 MB 只是 `_internal`）。打完包务必再跑一次 `smoke_test.py`。
+
 ## 已知限制
 
 - 版式识别靠正则 + 自校准，**不再需要调坐标常量**；换 App 主要改正则
