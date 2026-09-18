@@ -1,0 +1,53 @@
+# ===== 绝不入库：原始账单与任何真实交易数据 =====
+账单1/
+账单2/
+outputs/
+*.xlsx
+*.xls
+*.inspect.ndjson
+
+# ===== 打包产物 / 构建缓存 =====
+dist/
+build/
+*.spec
+__pycache__/
+*.py[cod]
+*.pyd
+
+# ===== 日志与临时文件 =====
+*.log
+*.tmp
+*.bak
+_scan*
+_cmp_*.py
+_do_*.py
+_verify_*.py
+
+# ===== 归档的待删文件（698 MB）=====
+_待删归档/
+
+# ===== 本机会话数据（含 memory 日志，不入库）=====
+.workbuddy/
+
+# ===== 根目录遗留/二次产物（归属未确认）=====
+/_*.mjs
+/_*.json
+/_*.py
+/docs/无用文件清理清单_*.md
+
+# ===== 图标源图（ImageGen 大图，成品见 app.ico / icon.png）=====
+bill2excel/A_flat_vector_app_icon__*.png
+
+# ===== 依赖 / 环境 =====
+node_modules/
+.venv/
+venv/
+uv.lock
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
