@@ -28,6 +28,9 @@ _BAD_FILL = PatternFill("solid", fgColor="FFC7CE")
 _BAD_FONT = Font(bold=True, color="9C0006")
 _HIT_FILL = PatternFill("solid", fgColor="FFD400")
 _HIT_FONT = Font(bold=True, color="7F3F00")
+_MARK_FILL = PatternFill("solid", fgColor="FF9999")
+"""用户在截图上用红框圈出来的行 —— 需要特别核对，红色底纹。"""
+_MARK_FONT = Font(bold=True, color="7F0000")
 _CENTER = Alignment(horizontal="center", vertical="center")
 _LEFT = Alignment(horizontal="left", vertical="center")
 _RIGHT = Alignment(horizontal="right", vertical="center")
@@ -86,6 +89,26 @@ def _highlight(ws, records: Sequence[Record], start: int, hits: set[float], with
     return count
 
 
+def _mark_flagged(ws, records: Sequence[Record], start: int, with_source: bool) -> int:
+    """给用户红框圈住的行加红底，返回标记行数。
+
+    要在 ``_highlight`` **之后**调用 —— 红框是用户亲手标的，比「金额命中」更具体，
+    两种都命中时红色应当覆盖黄色。
+    """
+    count = 0
+    last_column = len(HEAD) if with_source else len(HEAD) - 1
+    for offset, record in enumerate(records, 1):
+        if not record.flagged:
+            continue
+        count += 1
+        row = start + offset
+        for column in range(1, last_column + 1):
+            ws.cell(row=row, column=column).fill = _MARK_FILL
+        for column in (3, 4):
+            ws.cell(row=row, column=column).font = _MARK_FONT
+    return count
+
+
 def _totals(records: Sequence[Record]) -> tuple[float, float]:
     expense = round(sum(-r.amount for r in records if r.amount < 0), 2)
     income = round(sum(r.amount for r in records if r.amount > 0), 2)
@@ -131,6 +154,8 @@ def write_statement(
     all_pages = sorted(candidates, key=lambda p: rank.get(p.source, (len(groups), 0)))
     records = all_records(groups)
     total_expense, total_income = _totals(records)
+    # 红框标记的数量要在写「核对说明」之前就知道，所以先数一遍
+    marked_count = sum(1 for record in records if record.flagged)
     file_count = len(all_pages) + sum(len(p.copies) for p in all_pages)
 
     workbook = Workbook()
@@ -170,7 +195,7 @@ def write_statement(
             verdict, verdict_fill, verdict_font = f"差 {diff:,.2f}", _BAD_FILL, _BAD_FONT
         sources = "、".join(p.source for p in group.pages)
         values = [
-            f"{group.year}年",
+            group.year_label,
             group.period_label,
             sources,
             len(group.records),
@@ -224,15 +249,37 @@ def write_statement(
     notes = [
         "核对说明",
         "1. 页面顶部汇总卡的「支出/收入」是该搜索条件下的全额合计，这里与明细逐笔求和比对；差异为 0.00 即完全一致。",
-        "2. 差异不为 0 时已标红：长截图拼接可能漏抓个别交易，建议补截该期间账单核对（不是识别错误）。",
+        "2. 差异不为 0 时已标红，逐组原因见下方「缺口说明」。",
         f"3. 黄色底纹 = 金额为 {_format_hits(hits)} 元的交易。",
-        "4. 同一年份被拆成多段截图时，段与段的重叠部分按「日期+时间+金额+余额」去重；"
-        "各分表按原图保留，汇总与全部明细已去重。",
-        "5. 图片文件按内容 MD5 去重，内容完全相同的副本只算一张，见下方文件对照。",
+        f"4. 红色底纹 = 你在截图上用红框圈出来、需要特别核对的行（共 {marked_count} 笔）。",
+        "5. 跨图去重：同一笔交易可能同时出现在长截图和单屏截图里，已按「日期+类型+金额+余额」合并，见下方「跨图重复」。",
+        "6. 图片文件按内容 MD5 去重，内容完全相同的副本只算一张，见下方文件对照。",
+        "7. 定位方式是自校准：从每张图自己的金额块量出行距与字号，不写死分辨率，换手机/换截图工具都不受影响。",
     ]
     for note in notes:
         ws.cell(row=row, column=1, value=note).font = Font(size=9, bold=note == "核对说明")
         row += 1
+
+    gaps = [(g.year_label, g.gap_note) for g in groups if g.gap_note]
+    if gaps:
+        row += 1
+        ws.cell(row=row, column=1, value="缺口说明").font = Font(bold=True, size=10, color="1F4E79")
+        row += 1
+        for label, note in gaps:
+            ws.cell(row=row, column=1, value=f"{label}：{note}").font = Font(size=9)
+            row += 1
+
+    crosses = [(kept, dropped, count) for g in groups for kept, dropped, count in g.cross]
+    if crosses:
+        row += 1
+        ws.cell(row=row, column=1, value="跨图重复（已合并）").font = Font(
+            bold=True, size=10, color="1F4E79"
+        )
+        row += 1
+        for kept, dropped, count in crosses:
+            ws.cell(row=row, column=1,
+                    value=f"{dropped} 有 {count} 笔与 {kept} 重复，已只保留一笔。").font = Font(size=9)
+            row += 1
 
     row += 1
     ws.cell(row=row, column=1, value="文件对照（重复文件 → 唯一截图）").font = Font(
@@ -266,6 +313,7 @@ def write_statement(
     ws_all["A1"].font = Font(bold=True, size=11, color="1F4E79")
     end = _write_records(ws_all, records, 2, with_source=True)
     _highlight(ws_all, records, 2, hits, with_source=True)
+    _mark_flagged(ws_all, records, 2, with_source=True)
     row = end + 2
     ws_all.cell(row=row, column=2, value="支出合计").font = Font(bold=True)
     cell = ws_all.cell(row=row, column=4, value=total_expense)
@@ -295,10 +343,12 @@ def write_statement(
         ws_page["A2"] = (
             f"共 {len(page_records)} 笔　支出 {expense:,.2f} 元　收入 {income:,.2f} 元"
             f"　黄色行为 {_format_hits(hits)} 元"
+            + (f"　本图有 {page.marks} 个红框标注（红底行）" if page.marks else "")
         )
         ws_page["A2"].font = Font(size=9, color="7F3F00", bold=True)
         _write_records(ws_page, page_records, 3, with_source=False)
         _highlight(ws_page, page_records, 3, hits, with_source=False)
+        _mark_flagged(ws_page, page_records, 3, with_source=False)
         for index, width in enumerate(WIDTHS[:-1], 1):
             ws_page.column_dimensions[get_column_letter(index)].width = width
         ws_page.freeze_panes = "A4"

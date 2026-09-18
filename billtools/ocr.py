@@ -1,6 +1,6 @@
-"""账单长截图的扫描、去重与 OCR。
+"""账单长截图的扫描、去重、红色标注框检测与 OCR。
 
-本模块只做「图片 -> 文字块」，不含任何账单语义。
+本模块只做「图片 -> 文字块 / 标注框」，不含任何账单语义。
 所有坐标都是原图像素坐标（左上为原点），因此跨切片的结果可以直接合并。
 """
 
@@ -23,7 +23,27 @@ STEP_H = 2600
 TAIL_H = 2400
 """尾部补识别高度。高度 < 500px 的切片会被检测模型整体判空，所以尾部单独再跑一遍。"""
 
+RED_MIN = 140
+"""红色通道亮度下限。"""
+RED_DOMINANCE = 60
+"""红色必须比绿/蓝高出这么多，才算是「标注用的红」。"""
+MARK_MIN_PIXELS = 120
+"""一个标注框至少要有这么多红色像素，滤掉噪点。"""
+MARK_MIN_SIDE = 24
+"""标注框的长边下限，滤掉小红点。"""
+MARK_GAP = 12
+"""纵向间隔超过它就切开，认为换了一个标注框。"""
+MARK_MAX_INSIDE = 0.15
+"""标注框内部允许的红色占比上限。
+
+手绘的标注框是「描边矩形」，内部基本是空的（只有黑色文字）；而手机状态栏里那些
+橙红色的 App 图标是**实心色块**，内部也是红的。实测真框内部红占比 0.000、
+状态栏图标 0.344，区分度足够。少了这条过滤，每张截图顶部的状态栏图标都会被误判成标注框。
+"""
+
 ProgressFn = Callable[[str], None]
+Mark = tuple[float, float, float, float]
+"""用户手绘的红色标注框：(左, 上, 右, 下)，原图像素坐标。"""
 
 
 @dataclass(frozen=True)
@@ -51,6 +71,8 @@ class Shot:
     copies: list[Path] = field(default_factory=list)
     size: tuple[int, int] = (0, 0)
     items: list[Item] = field(default_factory=list)
+    marks: list[Mark] = field(default_factory=list)
+    """用户手绘的红色标注框；框住的行需要特别核对。"""
 
 
 def md5(path: Path, chunk_size: int = 1 << 20) -> str:
@@ -91,8 +113,67 @@ def scan_images(folder: Path) -> list[Shot]:
     return [Shot(path=paths[0], copies=paths[1:]) for paths in buckets.values()]
 
 
+def find_marks(image: Image.Image) -> list[Mark]:
+    """找出图里用户手绘的红色标注框。
+
+    用户会把「需要特别核对」的行用红框圈出来。红框的画法（描边矩形）没法直接当
+    矩形读，所以这里先取红色像素掩码，再按纵向间隔聚类：每个簇的包围盒就是一个框。
+    同一区域内多个框会并成一个，这不影响结果 —— 落到行上的归属是一样的。
+
+    Args:
+        image: 已打开的图片。
+
+    Returns:
+        ``(左, 上, 右, 下)`` 列表；没有红色标注时返回空列表。
+    """
+    rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
+    red, green, blue = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    mask = (red >= RED_MIN) & (red - green >= RED_DOMINANCE) & (red - blue >= RED_DOMINANCE)
+
+    rows = np.flatnonzero(mask.any(axis=1))
+    if rows.size == 0:
+        return []
+
+    bands: list[tuple[int, int]] = []
+    start = previous = int(rows[0])
+    for value in rows[1:]:
+        value = int(value)
+        if value - previous > MARK_GAP:
+            bands.append((start, previous))
+            start = value
+        previous = value
+    bands.append((start, previous))
+
+    marks: list[Mark] = []
+    for top, bottom in bands:
+        band = mask[top : bottom + 1]
+        columns = np.flatnonzero(band.any(axis=0))
+        left, right = int(columns[0]), int(columns[-1])
+        if band.sum() < MARK_MIN_PIXELS:
+            continue
+        if bottom - top < MARK_MIN_SIDE or right - left < MARK_MIN_SIDE:
+            continue
+        if _interior_ratio(band, left, right) > MARK_MAX_INSIDE:
+            # 内部也是红的 → 实心色块（状态栏图标），不是手绘标注框
+            continue
+        marks.append((float(left), float(top), float(right), float(bottom)))
+    return marks
+
+
+def _interior_ratio(band: "np.ndarray", left: int, right: int) -> float:
+    """标注框包围盒去掉外圈之后，内部红色像素的占比。"""
+    region = band[:, left : right + 1]
+    height, width = region.shape
+    thickness = max(3, round(0.06 * min(width, height)))
+    interior = region[
+        thickness : max(thickness + 1, height - thickness),
+        thickness : max(thickness + 1, width - thickness),
+    ]
+    return float(interior.mean()) if interior.size else 1.0
+
+
 def ocr_shot(shot: Shot, engine: RapidOCR, progress: ProgressFn | None = None) -> Shot:
-    """分块识别一张长截图，结果写入 ``shot.items``（原地修改）。
+    """分块识别一张长截图，结果写入 ``shot.items`` / ``shot.marks``（原地修改）。
 
     Args:
         shot: 待识别的截图。
@@ -105,6 +186,7 @@ def ocr_shot(shot: Shot, engine: RapidOCR, progress: ProgressFn | None = None) -
     image = Image.open(shot.path)
     width, height = image.size
     shot.size = (width, height)
+    shot.marks = find_marks(image)
     items: list[Item] = []
 
     def run(y_from: int, y_to: int, keep_from: float, keep_to: float) -> None:
@@ -156,3 +238,32 @@ def ocr_shot(shot: Shot, engine: RapidOCR, progress: ProgressFn | None = None) -
 def create_engine() -> RapidOCR:
     """构造 OCR 引擎。开销大（加载 onnx 模型），全流程复用同一个实例。"""
     return RapidOCR()
+
+
+def selftest() -> None:
+    """纯函数自检：红色标注框检测。不依赖 OCR，也不依赖任何真实截图。"""
+
+    def canvas(height: int, width: int) -> "np.ndarray":
+        return np.full((height, width, 3), 255, dtype=np.uint8)
+
+    # 描边矩形 —— 手绘标注框，应当被认出来
+    ring = canvas(120, 300)
+    ring[20:100, 40:260] = (230, 70, 60)
+    ring[26:94, 46:254] = 255
+    found = find_marks(Image.fromarray(ring))
+    assert len(found) == 1, found
+    assert (found[0][0], found[0][1]) == (40.0, 20.0), found
+
+    # 实心橙红色块 —— 手机状态栏里的 App 图标，不许被当成标注框
+    blob = canvas(60, 120)
+    blob[10:50, 20:100] = (235, 119, 56)
+    assert find_marks(Image.fromarray(blob)) == [], "实心色块不该被当成标注框"
+
+    # 一点红都没有时返回空
+    assert find_marks(Image.fromarray(canvas(60, 120))) == []
+
+    print("ocr.selftest OK")
+
+
+if __name__ == "__main__":
+    selftest()

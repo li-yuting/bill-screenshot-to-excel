@@ -81,7 +81,7 @@ def _ocr_all(shots: list, log: LogFn) -> None:
 
 def run_statement(folder: Path, highlight: set[float], log: LogFn = print,
                   out: Path | None = None, shots: list | None = None) -> Path:
-    """工具一：好分期账单长截图 → 一图一表 + 汇总。
+    """工具一：账单列表长截图（好分期 / 建行等）→ 一图一表 + 汇总。
 
     Args:
         folder: 截图目录。
@@ -104,9 +104,24 @@ def run_statement(folder: Path, highlight: set[float], log: LogFn = print,
         shots = _scan(folder, log)
         _ocr_all(shots, log)
     pages = [
-        statement.parse_page(shot.items, shot.path.name, [c.name for c in shot.copies])
+        statement.parse_page(
+            shot.items, shot.path.name, [c.name for c in shot.copies], shot.marks
+        )
         for shot in shots
     ]
+    scale_lines = []
+    for shot in shots:
+        marks = f"，红框 {len(shot.marks)} 个" if shot.marks else ""
+        scale = statement.calibrate(shot.items)
+        if scale:
+            scale_lines.append(
+                f"    {shot.path.name}：{shot.size[0]}×{shot.size[1]}　"
+                f"量出行距 {scale.row_pitch:.0f} / 金额字号 {scale.money_h:.0f}{marks}"
+            )
+    if scale_lines:
+        log("自校准定位（不依赖手机分辨率）")
+        for line in scale_lines:
+            log(line)
     missing_summary = [p.source for p in pages if p.summary is None]
     if missing_summary:
         log(f"警告：这些图没识别到顶部汇总卡，将不做金额勾稽：{', '.join(missing_summary)}")
@@ -123,16 +138,33 @@ def run_statement(folder: Path, highlight: set[float], log: LogFn = print,
         else:
             verdict = f"差 {diff:,.2f}"
         log(
-            f"  {group.year}年  {len(group.records):>4} 笔  "
+            f"  {group.year_label}  {len(group.records):>4} 笔  "
             f"支出 {group.expense:>12,.2f}（页面 {group.card_expense}）  "
             f"收入 {group.income:>10,.2f}（页面 {group.card_income}）  {verdict}"
         )
+        if group.gap_note:
+            log(f"      {group.gap_note}")
     duplicates = sum(group.duplicates for group in groups)
     if duplicates:
-        log(f"  已去除重叠段重复交易 {duplicates} 笔")
+        log(f"  已跨图合并重复交易 {duplicates} 笔：")
+        for group in groups:
+            for kept, dropped, count in group.cross:
+                log(f"    {dropped} 有 {count} 笔与 {kept} 重复")
+    flagged = sum(1 for group in groups for r in group.records if r.flagged)
+    if flagged:
+        log(f"  你在截图上用红框标注了 {flagged} 笔，输出里已用红色底纹标出：")
+        for group in groups:
+            for record in group.records:
+                if record.flagged:
+                    log(f"    {record.date or '日期未知'}  {record.kind}  "
+                        f"{record.amount:,.2f}  {record.card}")
+    uncertain = sum(1 for group in groups for r in group.records if r.uncertain)
+    if uncertain:
+        log(f"  另有 {uncertain} 笔既没读到余额也没读到渠道，去重无法判定，"
+            f"已按「宁可重复也不丢失」保留，请在输出里人工确认")
 
     if out is None:
-        years = sorted({group.year for group in groups if group.year.isdigit()})
+        years = sorted({r.date[:4] for group in groups for r in group.records if r.date})
         span = f"{years[0]}-{years[-1]}" if years else "全部"
         out = folder / f"账单明细_{span}.xlsx"
     excel.write_statement(out, groups, highlight, pages)
@@ -227,9 +259,9 @@ class ToolSpec:
 TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         key="statement",
-        name="好分期账单长截图",
-        subtitle="多段长截图 · 一图一表 + 汇总",
-        hint="识别顶部汇总卡、逐行金额与余额",
+        name="账单列表长截图",
+        subtitle="好分期 / 建行等 · 一图一表 + 汇总",
+        hint="自校准定位，不依赖手机分辨率",
         runner=run_statement,
     ),
     ToolSpec(
@@ -533,6 +565,7 @@ def selftest(tool_key: str, folder: Path) -> int:
     import statement
 
     statement.selftest()
+    ocr.selftest()
     detail.selftest()
     spec = find_tool(tool_key)
 
@@ -564,17 +597,18 @@ def selftest(tool_key: str, folder: Path) -> int:
         print(f"[check] 支出合计 {sum(abs(d.signed_amount or 0) for d in details):,.2f} 元")
     else:
         pages = [
-            statement.parse_page(s.items, s.path.name, [c.name for c in s.copies]) for s in shots
+            statement.parse_page(s.items, s.path.name, [c.name for c in s.copies], s.marks)
+            for s in shots
         ]
         groups = statement.build_groups(pages)
         for group in groups:
-            print(f"        {group.year}年  支出 {group.expense:>12,.2f}"
+            print(f"        {group.year_label}  支出 {group.expense:>12,.2f}"
                   f"（页面 {group.card_expense}）差异 {group.expense_diff}"
                   f"  收入 {group.income:>10,.2f}（页面 {group.card_income}）")
             if group.card_expense is None:
                 failures.append(f"{group.name} 没识别出汇总卡")
             elif group.income_diff != 0:
-                failures.append(f"{group.year}年 收入差 {group.income_diff:,.2f}")
+                failures.append(f"{group.year_label} 收入差 {group.income_diff:,.2f}")
 
     target = spec.runner(folder, parse_highlight(DEFAULT_HIGHLIGHT), shots=shots)
     print(f"[check] 生成文件：{target}")
