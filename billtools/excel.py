@@ -10,7 +10,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from detail import Detail, summaries_of
+from detail import Detail, extra_columns, summaries_of
 from statement import Group, Page, Record, all_records
 
 HEAD = ["序号", "日期", "交易类型", "金额(元)", "卡/渠道", "时间", "交易后余额(元)", "来源工作表"]
@@ -374,6 +374,14 @@ DETAIL_HEAD = [
 ]
 DETAIL_WIDTHS = [6, 12, 10, 12, 10, 30, 16, 15, 15, 10, 22]
 
+EXTRA_WIDTHS = {"交易流水号": 36, "对方账户": 30, "商品信息": 26, "商户名称": 22}
+
+
+def _extra_width(label: str) -> float:
+    """版式特有字段的列宽：流水号这种长值要给够。"""
+    return EXTRA_WIDTHS.get(label, 16)
+
+
 
 def _section(ws, row: int, title: str, columns: Sequence[str], rows: Sequence[Sequence],
              money_cols: Sequence[int] = (), percent_cols: Sequence[int] = ()) -> int:
@@ -452,8 +460,9 @@ def write_detail(
     ws = workbook.active
     ws.title = "明细"
     ws["A1"] = (
-        f"收支详情明细：{file_count} 个图片文件 → 内容去重 {unique_images} 张"
+        f"交易明细：{file_count} 个图片文件 → 内容去重 {unique_images} 张"
         f" → 同一笔合并后 {len(ordered)} 笔交易"
+        + (f"　版式：{'、'.join(report['profiles'])}" if report["profiles"] else "")
     )
     ws["A1"].font = Font(bold=True, size=12, color="1F4E79")
     ws["A2"] = (
@@ -461,20 +470,29 @@ def write_detail(
         f"黄色行为 {_format_hits(hits)} 元"
     )
     ws["A2"].font = Font(size=9, color="7F3F00", bold=True)
-    _headers(ws, 3, DETAIL_HEAD)
+
+    # 版式特有字段按实际出现过的标签动态加列（两种版式的列不完全一样）
+    extras = extra_columns(ordered)
+    columns = list(DETAIL_HEAD) + extras
+    _headers(ws, 3, columns)
     row = 3
     for index, item in enumerate(ordered, 1):
         row += 1
         values = [
             index, item.date, item.clock, item.signed_amount, item.summary, item.place,
             item.balance, item.card, item.account, item.holder, item.source,
-        ]
+        ] + [item.extra.get(label, "") for label in extras]
         for column, value in enumerate(values, 1):
             cell = ws.cell(row=row, column=column, value=value)
             cell.border = _BORDER
-            cell.alignment = _RIGHT if column in (4, 7) else _CENTER
-            if column in (4, 7) and isinstance(value, (int, float)):
-                cell.number_format = _MONEY
+            if column in (4, 7):
+                cell.alignment = _RIGHT
+                if isinstance(value, (int, float)):
+                    cell.number_format = _MONEY
+            elif column > len(DETAIL_HEAD):
+                cell.alignment = _LEFT
+            else:
+                cell.alignment = _CENTER
         if item.signed_amount is not None and round(abs(item.signed_amount), 2) in hits:
             for column in range(1, len(values) + 1):
                 ws.cell(row=row, column=column).fill = _HIT_FILL
@@ -486,7 +504,7 @@ def write_detail(
     ws.cell(row=row, column=5, value="收入合计").font = Font(bold=True)
     cell = ws.cell(row=row, column=6, value=income)
     cell.number_format, cell.font = _MONEY, Font(bold=True)
-    for index, width in enumerate(DETAIL_WIDTHS, 1):
+    for index, width in enumerate(DETAIL_WIDTHS + [_extra_width(l) for l in extras], 1):
         ws.column_dimensions[get_column_letter(index)].width = width
     ws.freeze_panes = "A4"
 
@@ -502,6 +520,7 @@ def write_detail(
         ["收入合计(元)", income],
         ["净额(元)", round(income - expense, 2)],
         ["时间范围", f"{ordered[0].date} ~ {ordered[-1].date}"],
+        ["识别到的版式", "、".join(report["profiles"]) or "—"],
         ["交易卡号", "、".join(report["cards"]) or "—"],
         ["交易账户", "、".join(report["accounts"]) or "—"],
         ["交易户名", "、".join(report["holders"]) or "—"],
@@ -528,19 +547,34 @@ def write_detail(
                    money_cols=(3,), percent_cols=(4,))
 
     checked = len(ordered) - len(report["unknown"])
+    if checked == 0:
+        amount_check = "该版式没有「交易金额」字段，跳过（改看下一行的日期交叉校验）"
+    else:
+        amount_check = (
+            f"{checked}/{len(ordered)} 通过；不一致 {len(report['inconsistent'])} 张"
+        )
+    date_checked = report["date_checked"]
+    if date_checked == 0:
+        date_check = "该版式没有「记账日」字段，跳过"
+    else:
+        date_check = (
+            f"{date_checked}/{len(ordered)} 通过；不一致 {len(report['date_inconsistent'])} 张"
+        )
     issues: list[list] = [
-        ["交易金额 与 顶部金额 一致",
-         f"{checked}/{len(ordered)} 通过；不一致 {len(report['inconsistent'])} 张"],
-        ["字段缺失", "无" if not report["missing"] else f"{len(report['missing'])} 张"],
+        ["交易金额 与 顶部金额 一致", amount_check],
+        ["记账日 与 交易时间日期 一致", date_check],
+        ["未读到的字段", "无" if not report["missing"] else f"{len(report['missing'])} 张（明细见下）"],
         ["重复图片文件（内容相同）", f"{len(duplicates)} 个（已去重）"],
         ["重复截图（同一笔交易）", f"{len(repeats)} 张（已合并）"],
         ["原始文件 → 去重后",
          f"{file_count} 个 → {unique_images} 张唯一截图 → {len(ordered)} 笔交易"],
     ]
     for source in report["inconsistent"]:
-        issues.append(["不一致截图", source])
+        issues.append(["金额不一致截图", source])
+    for source in report["date_inconsistent"]:
+        issues.append(["日期不一致截图", source])
     for source, fields in report["missing"].items():
-        issues.append(["字段缺失截图", f"{source}（缺 {'、'.join(fields)}）"])
+        issues.append(["未读到的字段", f"{source}（缺 {'、'.join(fields)}）"])
     for copy_name, source in duplicates.items():
         issues.append(["重复文件（内容相同）", f"{copy_name} = {source}"])
     for copy_name, source in repeats.items():
@@ -548,8 +582,13 @@ def write_detail(
     row = _section(ws2, row, "自动校验", ["项目", "结果"], issues)
 
     ws2.cell(row=row, column=1, value=(
-        "说明：①「交易金额」是页面下方字段值，顶部大金额是主金额，两者绝对值必须相等；"
-        "② 内容完全相同的图片按 MD5 去重；③ 交易时间+金额+余额+卡号都相同视为同一笔交易被重复截图，已合并。"
+        "说明：① 版式按图上命中的特征标签自动识别，两种版式（收支详情单页 / 建行「明细详情」）"
+        "共用同一套「标签—值」取值逻辑；② 建行版式没有「交易金额」字段，"
+        "改用「记账日」与「交易时间」的日期是否一致来交叉校验；"
+        "③ 内容完全相同的图片按 MD5 去重；④ 交易时间 + 金额 + 余额 + 账户都相同视为同一笔交易"
+        "被重复截图，已合并；⑤ 「交易流水号」「对方账户」这类换行的长值会按行拼接后写入；"
+        "⑥ 报「未读到的字段」不一定是识别问题 —— 部分交易在页面上本来就没有某些行"
+        "（例如建行版式的「商品信息」），属正常差异。"
     )).font = Font(size=9)
     for index, width in enumerate([34, 22, 16, 12], 1):
         ws2.column_dimensions[get_column_letter(index)].width = width

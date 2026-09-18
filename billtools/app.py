@@ -175,7 +175,7 @@ def run_statement(folder: Path, highlight: set[float], log: LogFn = print,
 
 def run_detail(folder: Path, highlight: set[float], log: LogFn = print,
                out: Path | None = None, shots: list | None = None) -> Path:
-    """工具二：收支详情单页 → 明细 + 多维汇总。
+    """工具二：单笔交易详情页（收支详情 / 建行「明细详情」）→ 明细 + 多维汇总。
 
     Args:
         folder: 截图目录。
@@ -206,7 +206,13 @@ def run_detail(folder: Path, highlight: set[float], log: LogFn = print,
                 detail.parse_page(shot.items, shot.path.name, [c.name for c in shot.copies])
             )
         except ValueError as exc:
-            log(f"跳过（不是收支详情图？）：{exc}")
+            log(f"跳过（不是单笔详情图？）：{exc}")
+
+    profiles = {}
+    for item in details:
+        profiles[item.profile_title] = profiles.get(item.profile_title, 0) + 1
+    if profiles:
+        log("识别到的版式：" + "、".join(f"{k} {v} 张" for k, v in profiles.items()))
 
     details, repeats = detail.dedupe(details)
     if repeats:
@@ -218,16 +224,30 @@ def run_detail(folder: Path, highlight: set[float], log: LogFn = print,
     checked = len(details) - len(report["unknown"])
     log("")
     log("自动校验")
-    log(f"  交易金额与顶部金额一致：{checked}/{len(details)} 通过"
-        f"，不一致 {len(report['inconsistent'])} 张")
-    log(f"  字段缺失：{'无' if not report['missing'] else len(report['missing'])} 张")
+    if checked:
+        log(f"  交易金额与顶部金额一致：{checked}/{len(details)} 通过"
+            f"，不一致 {len(report['inconsistent'])} 张")
+    else:
+        log("  交易金额与顶部金额一致：本版式没有「交易金额」字段，跳过")
+    if report["date_checked"]:
+        log(f"  记账日与交易时间日期一致：{report['date_checked']}/{len(details)} 通过"
+            f"，不一致 {len(report['date_inconsistent'])} 张")
+    else:
+        log("  记账日与交易时间日期一致：本版式没有「记账日」字段，跳过")
+    log(f"  未读到的字段：{'无' if not report['missing'] else len(report['missing'])} 张"
+        f"（不一定有问题 —— 部分交易在页面上本来就没有某些行）")
     for source in report["inconsistent"]:
         log(f"    ! 金额不一致：{source}")
+    for source in report["date_inconsistent"]:
+        log(f"    ! 日期不一致：{source}")
     for source, fields in report["missing"].items():
-        log(f"    ! 字段缺失：{source}（缺 {'、'.join(fields)}）")
+        log(f"    · 未读到：{source}（缺 {'、'.join(fields)}）")
     log(f"  卡号 {'、'.join(report['cards']) or '—'}"
         f"　账户 {'、'.join(report['accounts']) or '—'}"
         f"　户名 {'、'.join(report['holders']) or '—'}")
+    extras = detail.extra_columns(details)
+    if extras:
+        log(f"  版式特有字段（已加列）：{'、'.join(extras)}")
     expense = round(sum(-d.signed_amount for d in details if (d.signed_amount or 0) < 0), 2)
     income = round(sum(d.signed_amount for d in details if (d.signed_amount or 0) > 0), 2)
     log(f"  合计 {len(details)} 笔：支出 {expense:,.2f} 元，收入 {income:,.2f} 元")
@@ -266,9 +286,9 @@ TOOLS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         key="detail",
-        name="收支详情单页",
-        subtitle="每图一笔 · 明细 + 多维汇总",
-        hint="识别 金额 / 时间 / 摘要 / 交易场所 等 8 字段",
+        name="单笔交易详情页",
+        subtitle="收支详情 / 建行明细详情 · 每图一笔",
+        hint="自动识别版式，按「标签—值」取值",
         runner=run_detail,
     ),
 )
